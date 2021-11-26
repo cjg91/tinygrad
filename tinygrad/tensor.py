@@ -35,8 +35,9 @@ class ProfileOp:
 # **** start with two base classes, Tensor and Function ****
 
 # TODO: make this class creation generic
-class Device: CPU, GPU, TORCH, buffers, imports = 0, 1, 2, {}, {0:"ops_cpu", 1:"ops_gpu", 2:"ops_torch"}
-DEFAULT_DEVICE = (Device.CPU if os.environ.get("GPU", 0) != "1" else Device.GPU) if os.environ.get("TORCH", 0) != "1" else Device.TORCH
+class Device: CPU, GPU, TORCH, PYNQ, buffers, imports = 0, 1, 2, 3, {}, {0:"ops_cpu", 1:"ops_gpu", 2:"ops_torch", 3:"ops_pynq"}
+# DEFAULT_DEVICE = (Device.CPU if os.environ.get("GPU", 0) != "1" else Device.GPU) if os.environ.get("TORCH", 0) != "1" else Device.TORCH
+DEFAULT_DEVICE = Device.PYNQ
 
 class Tensor:
   did_float_warning = False
