@@ -53,13 +53,20 @@ My accel will have to read arrays from an AXI stream and write outputs to an AXI
 
 I have no idea how you implement matmul given that A and B are contiguous in memory. Perhaps you read B rows in typical contiguous format and place them in B's BRAM columns to transpose it on read.
 
-My PYNQ board has 630KB of BRAM which can handle 160,000 elements. That's 9 128x128 matrices which means we can have multiple matmul accelerators or a <b>cube</b> accelerator.
+My PYNQ board has 4.9MB of BRAM (630KB of fast BRAM?) which can handle 1.2M elements. That's 76 matrices which means we can have multiple matmul accelerators or a <b>cube</b> accelerator.
+
+Some guy has a great [DMA tutorial](https://discuss.pynq.io/t/tutorial-pynq-dma-part-1-hardware-design/3133) on the PYNQ forums.
+
+And here is a [Xilinx guide](https://www.xilinx.com/support/documentation/application_notes/xapp1209-designing-protocol-processing-systems-hls.pdf) on implementing 'Protocol Processing'
+
+
+I can just write and test the HLS in software at any time!! Plus implement it in Tinygrad.
 
 
 ### Little Q/A
 Q: Where do HLS arrays live (when you do HLS ARRAY PARTITION)?
 
-A: [Examples with HLS streaming](https://github.com/Xilinx/Vitis-HLS-Introductory-Examples/tree/master/Interface/Streaming) and [lecture notes](https://www.csl.cornell.edu/courses/ece5775/pdf/lecture02.pdf).
+A: [Examples with HLS streaming](https://github.com/Xilinx/Vitis-HLS-Introductory-Examples/tree/master/Interface/Streaming) and [lecture notes](https://www.csl.cornell.edu/courses/ece5775/pdf/lecture02.pdf). Arrays generally map to ROMs or RAMs. They can be partitioned across multiple RAMs with certain #pragmas. Partition with element-by-element interleaving or block chunking. 
 
 Q: Is 'transpose on copy' free? (AKA read rows in DRAM into cols in BRAM and vice versa for writing) Does a BRAM know it's a row BRAM?
 
