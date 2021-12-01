@@ -1,5 +1,5 @@
 import numpy as np
-from .tensor import Function
+from ..tensor import Function
 
 class CPUBuffer(np.ndarray):
   def log(x):
@@ -16,6 +16,8 @@ class CPUBuffer(np.ndarray):
     return x.transpose(order)
   def type(x, tt):
     return x.astype(tt)
+  def custompad(x, padding):
+    return np.pad(x, padding)
   def toCPU(x):
     return x
   @staticmethod
@@ -44,7 +46,7 @@ class Log(Function):
 
 class Exp(Function):
   def forward(ctx, input):
-    ret = input.exp()
+    ret = input.clip(-88, 88).exp()
     ctx.save_for_backward(ret)
     return ret
 
@@ -52,36 +54,30 @@ class Exp(Function):
     ret, = ctx.saved_tensors
     return grad_output * ret
 
-# ************* reduce ops *************
+# ************* reduce ops (with keepdims=True) *************
 
 class Sum(Function):
-  def forward(ctx, input, axis=None):
-    ctx.save_for_backward(input, axis)
-    return input.sum(axis) if axis != None else input.sum().reshape((1,))
+  def forward(ctx, input, axis):
+    ctx.save_for_backward(input.shape)
+    return input.sum(axis, keepdims=True)
 
   def backward(ctx, grad_output):
-    input, axis = ctx.saved_tensors
-    if isinstance(axis, int): axis = [axis]
-    shape = [1 if axis is None or i in axis else input.shape[i] for i in range(len(input.shape))]
-    return grad_output.reshape(shape).expand(input.shape)
+    shape_input, = ctx.saved_tensors
+    return grad_output.expand(shape_input)
 
 class Max(Function):
-  def forward(ctx, inp, axis=None):
-    if isinstance(axis, int): axis = [axis]
-    ret = inp.amax(axis=None if axis is None else tuple(axis), keepdims=True)
+  def forward(ctx, inp, axis):
+    ret = inp.amax(axis=axis, keepdims=True)
     ctx.save_for_backward(inp, axis, ret)
-    if axis is not None:
-      ret = ret.reshape([inp.shape[i] for i in range(len(inp.shape)) if i not in axis])
     return ret
 
   def backward(ctx, grad_output):
     input, axis, ret = ctx.saved_tensors
-    shape = [1 if axis is None or i in axis else input.shape[i] for i in range(len(input.shape))]
-    ret2 = (input==ret.reshape(shape))
-    div = ret2.sum(axis=tuple(axis), keepdims=True) if axis is not None else ret2.sum()
-    return ret2*grad_output.reshape(shape)/div.type(input.dtype)
+    ret2 = (input==ret)
+    div = ret2.sum(axis=tuple(axis), keepdims=True)
+    return ret2*grad_output/div.type(input.dtype)
 
-# ************* binary ops *************
+# ************* binary ops (with broadcasting) *************
 
 def unbroadcast(out, in_sh):
   # adjoint operation to broadcast is sum. Need to sum all axis with 1 = in_sh[i] < out.shape[i]
@@ -149,7 +145,7 @@ class Transpose(Function):
 
 def inner_slice(x, arg):
   padding = [(max(0, -p[0]), max(0, p[1]-x.shape[i])) for i,p in enumerate(arg)]
-  x = np.pad(x, padding)
+  x = x.custompad(padding)
   slicee = [(p[0] + padding[i][0], p[1] + padding[i][0]) for i,p in enumerate(arg)]
   return x[tuple([slice(x[0], x[1], None) for x in slicee])]
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 import unittest
 import numpy as np
-from tinygrad.tensor import Tensor, DEFAULT_DEVICE
+from tinygrad.tensor import Tensor, Device
 from tinygrad.nn import *
 from extra.utils import get_parameters
 import torch
 
-@unittest.skipUnless(not DEFAULT_DEVICE, "Not Implemented")
+@unittest.skipUnless(Device.DEFAULT == Device.CPU, "Not Implemented")
 class TestNN(unittest.TestCase):
 
   def test_batchnorm2d(self, training=False):
@@ -56,14 +56,14 @@ class TestNN(unittest.TestCase):
     def _test_linear(x):
 
       # create in tinygrad
-      layer = Linear(in_dim, out_dim)
-      z = layer(x)
+      layer = (Tensor.uniform(in_dim, out_dim), Tensor.zeros(out_dim))
+      z = x.linear(*layer)
 
       # create in torch
       with torch.no_grad():
         torch_layer = torch.nn.Linear(in_dim, out_dim).eval()
-        torch_layer.weight[:] = torch.tensor(layer.weight.data.T, dtype=torch.float32)
-        torch_layer.bias[:] = torch.tensor(layer.bias.data, dtype=torch.float32)
+        torch_layer.weight[:] = torch.tensor(layer[0].data.T, dtype=torch.float32)
+        torch_layer.bias[:] = torch.tensor(layer[1].data, dtype=torch.float32)
         torch_x = torch.tensor(x.cpu().data, dtype=torch.float32)
         torch_z = torch_layer(torch_x)
 

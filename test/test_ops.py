@@ -4,7 +4,7 @@ import numpy as np
 import unittest
 import timeit
 import functools
-from tinygrad.tensor import Tensor, DEFAULT_DEVICE, Device
+from tinygrad.tensor import Tensor, Device
 
 def helper_test_op(shps, torch_fxn, tinygrad_fxn, atol=1e-6, rtol=1e-3, grad_atol=1e-6, grad_rtol=1e-3, forward_only=False, vals=None, a=-0.5, b=20):
   torch.manual_seed(0)
@@ -69,6 +69,10 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65)], lambda x: x.sigmoid(), Tensor.sigmoid)
   def test_softplus(self):
     helper_test_op([(45,65)], lambda x: torch.nn.functional.softplus(x), Tensor.softplus, atol=1e-6, grad_atol=1e-6)
+  def test_gelu(self):
+    pass
+    # fails?
+    #helper_test_op([(45,65)], lambda x: 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x))), Tensor.gelu)
   def test_relu6(self):
     helper_test_op([(45,65)], lambda x: torch.nn.functional.relu6(x), Tensor.relu6)
   def test_hardswish(self):
@@ -79,6 +83,8 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65)], _mish_pytorch, Tensor.mish, atol=1e-4)
   def test_dot(self):
     helper_test_op([(45,65), (65,100)], lambda x,y: x.matmul(y), Tensor.dot, atol=1e-4)
+  def test_broadcastdot(self):
+    helper_test_op([(10,45,65), (65,45)], lambda x,y: x @ y, Tensor.dot, atol=1e-4)
   def test_multidot(self):
     helper_test_op([(10,45,65), (10,65,45)], lambda x,y: x @ y, Tensor.dot, atol=1e-4)
     helper_test_op([(3,3,45,65), (3,3,65,45)], lambda x,y: x @ y, Tensor.dot, atol=1e-4)
@@ -219,6 +225,10 @@ class TestOps(unittest.TestCase):
         helper_test_op([shape],
           lambda x: torch.nn.functional.avg_pool2d(x, kernel_size=ksz),
           lambda x: Tensor.avg_pool2d(x, kernel_size=ksz), rtol=1e-5)
+
+  def test_cat(self):
+    for dim in range(-1, 2):
+      helper_test_op([(45,65), (45,65)], lambda x,y: torch.cat((x,y), dim), lambda x,y: x.cat(y, dim))
 
 if __name__ == '__main__':
   np.random.seed(1337)

@@ -1,7 +1,8 @@
 import functools
 import pyopencl as cl
 import numpy as np
-from .tensor import Function
+from tinygrad.helpers import binary_broadcast
+from ..tensor import Function
 
 cl_ctx, cl_queue = None, None
 def require_init_gpu():
@@ -137,35 +138,26 @@ def reduce_op(ctx, code, code2, inp, axis=None, start="0.0"):
 
 class Sum(Function):
   def forward(ctx, input, axis=None):
-    if isinstance(axis, int): axis = [axis]
     ctx.save_for_backward(input, axis)
-    ret = reduce_op(ctx, "out += a", "out", input, axis=axis)
-    if axis is not None:
-      ret.shape = tuple([input.shape[i] for i in range(len(input.shape)) if i not in axis])
-    return ret
+    return reduce_op(ctx, "out += a", "out", input, axis=axis)
 
   def backward(ctx, grad_output):
     input, axis = ctx.saved_tensors
-    shape = [1 if axis is None or i in axis else input.shape[i] for i in range(len(input.shape))]
-    output = GPUBuffer(shape, hostbuf=grad_output)
+    output = GPUBuffer(grad_output.shape, hostbuf=grad_output)
     return binary_op(ctx, 'a+b', output, buffer_new(ctx, input.shape, zero=True))
 
 class Max(Function):
   def forward(ctx, input, axis=None):
-    if isinstance(axis, int): axis = [axis]
     ret = reduce_op(ctx, "out = max(a,out)", "out", input, axis=axis, start="-INFINITY")
     ctx.save_for_backward(input, axis, ret)
-    if axis is not None:
-      ret.shape = tuple([input.shape[i] for i in range(len(input.shape)) if i not in axis])
     return ret
 
   def backward(ctx, grad_output):
     input, axis, ret = ctx.saved_tensors
-    shape = [1 if axis is None or i in axis else input.shape[i] for i in range(len(input.shape))]
-    ret2 = binary_op(ctx, "1.0*(a==b)", input, GPUBuffer(shape, ret))
+    ret2 = binary_op(ctx, "1.0*(a==b)", input, ret)
     div = reduce_op(ctx, "out += a", "out+1e-10", ret2, axis=axis)
-    ret3 = binary_op(ctx, "a/b", ret2, GPUBuffer(shape, div))
-    return binary_op(ctx, 'a*b', ret3, GPUBuffer(shape, grad_output))
+    ret3 = binary_op(ctx, "a/b", ret2, div)
+    return binary_op(ctx, 'a*b', ret3, grad_output)
 
 # ************* binary ops *************
 
@@ -188,26 +180,11 @@ def get_binop_prg(cl_ctx, code, complist):
     res_g[gid0] = """+code+""";\n}""").build()
 
 def binary_op(ctx, code, x, y):
-  n_dims = max(len(x.shape), len(y.shape))
-  shape_x, shape_y = np.ones(n_dims, dtype=np.int32), np.ones(n_dims, dtype=np.int32)
-  shape_x[:len(x.shape)] = np.array(x.shape, dtype=np.int32)
-  shape_y[:len(y.shape)] = np.array(y.shape, dtype=np.int32)
-  if not np.all((shape_x == 1) | (shape_y == 1) | (shape_x == shape_y)):
-    raise Exception(f"binary op unbroadcastable shape mismatch: {x.shape} vs {y.shape}")
-  shape_ret = np.maximum(shape_x, shape_y)
-
-  dimlist, complist = [], [] # note: len(dimlist) may be less than n_dims
-  def push(dim, comp):
-    if len(complist) > 0 and complist[-1] == comp:
-      dimlist[-1] *= dim
-    elif comp != (False, False):
-      dimlist.append(dim); complist.append(comp)
-  for i in range(n_dims): # group together any adjacent dimensions that we can to simplify broadcasting
-    push(i32(max(shape_x[i], shape_y[i])), (shape_x[i] > 1, shape_y[i] > 1))
+  shape_ret, dimlist, complist = binary_broadcast(x.shape, y.shape)
+  prod_list = np.array(dimlist, dtype=i32)[-1::-1].cumprod(dtype=i32)[-1::-1] # take cumprod from back to front
 
   prg = get_binop_prg(cl_ctx, code, tuple(complist))
   ret = buffer_new(ctx, shape_ret, zero=True)
-  prod_list = np.array(dimlist, dtype=i32)[-1::-1].cumprod(dtype=i32)[-1::-1] # take cumprod from back to front
   prg.binop(cl_queue, [prod_list[0]] if len(dimlist) > 0 else [1], None, x.cl, y.cl, ret.cl, *dimlist, *(prod_list[1:]))
   return ret
 
@@ -223,7 +200,7 @@ class Add(Function):
   def backward(ctx, grad_output):
     grad_x, grad_y = grad_output, grad_output
     shape_x, shape_y = ctx.saved_tensors
-    return unbroadcast(ctx, grad_x, shape_x), unbroadcast(ctx, grad_y, shape_y),
+    return unbroadcast(ctx, grad_x, shape_x), unbroadcast(ctx, grad_y, shape_y)
 
 class Sub(Function):
   def forward(ctx, x, y):
@@ -233,7 +210,7 @@ class Sub(Function):
   def backward(ctx, grad_output):
     grad_x, grad_y = grad_output, unary_op(ctx, '-a', grad_output)
     shape_x, shape_y = ctx.saved_tensors
-    return unbroadcast(ctx, grad_x, shape_x), unbroadcast(ctx, grad_y, shape_y),
+    return unbroadcast(ctx, grad_x, shape_x), unbroadcast(ctx, grad_y, shape_y)
 
 class Mul(Function):
   def forward(ctx, x, y):
@@ -244,7 +221,7 @@ class Mul(Function):
     x,y = ctx.saved_tensors
     grad_x = binary_op(ctx, 'a*b', y, grad_output)
     grad_y = binary_op(ctx, 'a*b', x, grad_output)
-    return unbroadcast(ctx, grad_x, x.shape), unbroadcast(ctx, grad_y, y.shape),
+    return unbroadcast(ctx, grad_x, x.shape), unbroadcast(ctx, grad_y, y.shape)
 
 class Pow(Function):
   def forward(ctx, x, y):
@@ -257,7 +234,7 @@ class Pow(Function):
                       binary_op(ctx, 'b * (pow((float)a, (float)(b-1.0)))', x, y))
     grad_y = binary_op(ctx, 'a*b', grad_output,
                       binary_op(ctx, 'pow(a, (float)b) * log(a);', x, y))
-    return unbroadcast(ctx, grad_x, x.shape), unbroadcast(ctx, grad_y, y.shape),
+    return unbroadcast(ctx, grad_x, x.shape), unbroadcast(ctx, grad_y, y.shape)
 
 # ************* movement ops *************
 

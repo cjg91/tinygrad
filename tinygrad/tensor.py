@@ -32,19 +32,31 @@ class ProfileOp:
       debug_times[self.name] += et
       print(f"{self.name:>20} : {et:>7.2f} ms {str([y.shape for y in self.x]):>40} {'-> '+str(self.output.shape) if self.output is not None else ''}")
 
-# **** start with two base classes, Tensor and Function ****
+# **** enumerate supported devices ****
 
+class Device:
+  _ops = sorted(os.listdir(os.path.join(os.path.dirname(os.path.realpath(__file__)), "ops")))
+  imports = dict(enumerate([os.path.splitext(x)[0] for x in _ops if x.startswith("ops_")]))
+  DEFAULT = None
+  buffers = {}
+  for i,op in imports.items():
+    name = op[len("ops_"):].upper()
+    vars()[name] = i
+    DEFAULT = i if os.environ.get(name, 0) == "1" else DEFAULT
+  DEFAULT = CPU if DEFAULT is None else DEFAULT
+  
 # TODO: make this class creation generic
 class Device: CPU, GPU, TORCH, PYNQ, buffers, imports = 0, 1, 2, 3, {}, {0:"ops_cpu", 1:"ops_gpu", 2:"ops_torch", 3:"ops_pynq"}
 # DEFAULT_DEVICE = (Device.CPU if os.environ.get("GPU", 0) != "1" else Device.GPU) if os.environ.get("TORCH", 0) != "1" else Device.TORCH
 DEFAULT_DEVICE = Device.PYNQ
+
 
 class Tensor:
   did_float_warning = False
   training = True
   ops = defaultdict(dict)
 
-  def __init__(self, data, device=DEFAULT_DEVICE, requires_grad=True):
+  def __init__(self, data, device=Device.DEFAULT, requires_grad=True):
     self.device, self.data = device, self._move_data(data, device)
 
     self.grad, self.requires_grad = None, requires_grad
@@ -56,18 +68,22 @@ class Tensor:
     return f"<Tensor {self.data!r} with grad {(self.grad.data if self.grad else None)!r}>"
 
   def assign(self, x):
+    if not isinstance(x, Tensor):
+      x = Tensor(x)
+    assert self.shape == x.shape
     self.data = x.data
 
   @property
   def shape(self):
     return self.data.shape
 
+  @staticmethod
+  def _get_data_dtype(data):
+    return data.getdtype() if getattr(data, 'getdtype', None) else data.dtype
+
   @property
   def dtype(self):
-    if self.device == Device.TORCH:
-      return np.float32
-    else:
-      return self.data.dtype
+    return Tensor._get_data_dtype(self.data)
 
   # ***** creation helper functions *****
 
@@ -130,12 +146,14 @@ class Tensor:
 
   @staticmethod
   def _move_data(data, device):
+    if isinstance(data, list):
+      data = np.array(data, dtype=np.float32)
     if isinstance(data, np.ndarray):
       data = data.view(Device.buffers[Device.CPU])
     if isinstance(data, Device.buffers[device]):
       return data
 
-    if data.dtype != np.float32 and not Tensor.did_float_warning:
+    if Tensor._get_data_dtype(data) != np.float32 and not Tensor.did_float_warning:
       # warning? float64 is actually needed for numerical jacobian
       print(f"warning, {data.shape!r} isn't float32, it's {data.dtype}")
       Tensor.did_float_warning = True
@@ -159,6 +177,7 @@ class Tensor:
   
   def __getitem__(self, val):
     arg = []
+    new_shape = []
     if val is not None:
       for i, s in enumerate(val if isinstance(val, (list, tuple)) else [val]):
         if isinstance(s, int):
@@ -166,17 +185,55 @@ class Tensor:
         else:
           arg.append((s.start if s.start is not None else 0,
             (s.stop if s.stop >=0 else self.shape[i]+s.stop) if s.stop is not None else self.shape[i]))
+          new_shape.append(arg[-1][1] - arg[-1][0])
           assert s.step is None or s.step == 1
-    return self.slice(arg = arg + [(0,self.shape[i]) for i in range(len(arg), len(self.shape))])
+    new_shape += self.shape[len(arg):]
+    return self.slice(arg = arg + [(0,self.shape[i]) for i in range(len(arg), len(self.shape))]).reshape(shape=new_shape)
+
+  def cat(self, y, dim=0):
+    assert len(self.shape) == len(y.shape)
+    dim = (dim + len(self.shape)) if dim < 0 else dim
+    s1, s2 = [], []
+    for i in range(len(self.shape)):
+      if i != dim:
+        assert self.shape[i] == y.shape[i]
+        s1.append((0, self.shape[i]))
+        s2.append((0, self.shape[i]))
+      else:
+        s1.append((0, self.shape[i]+y.shape[i]))
+        s2.append((-self.shape[i], y.shape[i]))
+    return self.slice(arg=s1) + y.slice(arg=s2)
 
   def pad2d(self, padding):
     return self[:, :, -padding[2]:self.shape[2]+padding[3], -padding[0]:self.shape[3]+padding[1]]
 
-  def dot(self, w):
-    return self.matmul(w)
+  def matmul(self, w):
+    if len(self.shape) > 2 and len(w.shape) == 2:
+      return self.reshape(shape=(-1, self.shape[-1]))._matmul(w).reshape(shape=list(self.shape[0:-1]) + [-1])
+    else:
+      return self._matmul(w)
+  dot = matmul
 
-  def mean(self, axis=None):
-    out = self.sum(axis=axis)
+  def _canonicalize_reduce_axis(self, axis):
+    if axis is None: axis = range(len(self.shape))
+    if isinstance(axis, int): axis = [axis]
+    axis = tuple([x if x >= 0 else x+len(self.shape) for x in axis])
+    shape = [self.shape[i] for i in range(len(self.shape)) if i not in axis]
+    shape = [1] if shape == [] else shape
+    return axis, shape
+
+  def sum(self, axis=None, keepdim=False):
+    axis, out_shape = self._canonicalize_reduce_axis(axis)
+    ret = self._sum(axis=axis)
+    return ret if keepdim else ret.reshape(shape=out_shape)
+
+  def max(self, axis=None, keepdim=False):
+    axis, out_shape = self._canonicalize_reduce_axis(axis)
+    ret = self._max(axis=axis)
+    return ret if keepdim else ret.reshape(shape=out_shape)
+
+  def mean(self, axis=None, keepdim=False):
+    out = self.sum(axis=axis, keepdim=keepdim)
     return out * (np.prod(out.shape)/np.prod(self.shape))
 
   def sqrt(self):
@@ -187,8 +244,8 @@ class Tensor:
   __truediv__ = div
 
   def sigmoid(self):
-    e = self.exp()
-    return e.div(1 + e)
+    #e = self.exp(); return e.div(1 + e)
+    return (1.0 + (0.0-self).exp()) ** -1.0
 
   def swish(self):
     return self * self.sigmoid()
@@ -201,6 +258,11 @@ class Tensor:
 
   def tanh(self):
     return 2.0 * ((2.0 * self).sigmoid()) - 1.0
+
+  def gelu(x):
+    # https://github.com/huggingface/transformers/blob/master/src/transformers/activations.py
+    #import torch; return Tensor(torch.nn.functional.gelu(torch.tensor(x.data)).numpy())
+    return 0.5 * x * (1 + (x * 0.7978845608 * (1 + 0.044715 * x * x)).tanh())
 
   def leakyrelu(self, neg_slope=0.01):
     return self.relu() - (-neg_slope*self).relu()
@@ -250,6 +312,25 @@ class Tensor:
   def max_pool2d(self, kernel_size=(2,2)):
     return self._pool2d(*kernel_size).max(axis=(3,5))
 
+  def conv2d(self, weight, bias=None, stride=1, groups=1):
+    ret = self._conv2d(weight, stride=stride, groups=groups)
+    return ret if bias is None else ret.add(bias.reshape(shape=[1, -1, 1, 1]))
+
+  # ***** functional nn ops *****
+
+  def linear(self, weight, bias):
+    shp = [1] * (len(self.shape)-1) + [-1]
+    ret = self.mul(weight.reshape(shape=shp)) if len(weight.shape) == 1 else self.dot(weight)
+    return ret.add(bias.reshape(shape=shp))
+
+  def sequential(self, ll):
+    for l in ll: self = l(self)
+    return self
+
+  def layernorm(x, eps=1e-5):
+    y = (x - x.mean(axis=-1, keepdim=True))
+    return y.div((y*y).mean(axis=-1, keepdim=True).add(eps).sqrt())
+
 # An instantiation of the Function is the Context
 class Function:
   def __new__(cls, *args, **kwargs):
@@ -290,7 +371,10 @@ def register(name, fxn, device=Device.CPU):
     #f.cl_ctx, f.cl_queue, f.device = cl_ctx, cl_queue, tt.device
     f.device = tt.device
     return f.apply(f, *x, **kwargs)
-  setattr(Tensor, name, dispatch)
+  if getattr(Tensor, name, None) is not None:
+    setattr(Tensor, "_"+name, dispatch)
+  else:
+    setattr(Tensor, name, dispatch)
   if name in ['add', 'sub', 'mul', 'pow', 'matmul']:
     setattr(Tensor, f"__{name}__", dispatch)
     setattr(Tensor, f"__i{name}__", lambda self,x: self.assign(dispatch(self,x)))
@@ -309,6 +393,6 @@ def _register_ops(namespace, device=Device.CPU):
 import importlib
 for d,ops in Device.imports.items():
   try:
-    _register_ops(importlib.import_module('tinygrad.'+ops), d)
+    _register_ops(importlib.import_module('tinygrad.ops.'+ops), d)
   except ImportError:
     pass
